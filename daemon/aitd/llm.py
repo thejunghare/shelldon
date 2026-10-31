@@ -1,14 +1,14 @@
-"""LLM providers: Anthropic (Claude), and three OpenAI-compatible ones:
-NVIDIA (build.nvidia.com), OpenRouter (openrouter.ai) and Ollama (local models).
+"""LLM providers: Anthropic (Claude), plus OpenAI-compatible cloud APIs (OpenRouter,
+Groq, Cerebras, Gemini, Together, Fireworks, NVIDIA) and local model servers (Ollama,
+LM Studio, mlx-lm, llama.cpp, llamafile, LocalAI, Jan, GPT4All, exo).
 
 Which one is used:
-  1. AIT_PROVIDER=anthropic|nvidia|openrouter|ollama, if set
-  2. otherwise the one chosen with `ait use <provider>`
-  3. otherwise the first available of: Anthropic key, OpenRouter key, NVIDIA key,
-     a running Ollama
-Keys come from the environment (ANTHROPIC_API_KEY / NVIDIA_API_KEY / OPENROUTER_API_KEY)
-or the macOS Keychain (services "ai-terminal", "ai-terminal-nvidia",
-"ai-terminal-openrouter", set with `ait key`). Ollama needs no key.
+  1. AIT_PROVIDER=<name>, if set
+  2. otherwise the one chosen with `ait use <name>`
+  3. otherwise the first available in AUTO: cloud keys first, then running local servers
+Keys come from the environment (e.g. GROQ_API_KEY) or the macOS Keychain (services
+"ai-terminal-<provider>", "ai-terminal" for Anthropic; set with `ait key`). Local
+servers need no key.
 """
 import asyncio
 import logging
@@ -37,9 +37,9 @@ ANTHROPIC_MODELS = {
 _NOT_CHAT = re.compile(
     r"embed|rerank|retriev|guard|safety|reward|vision|vlm|-vl\b|vila|neva|clip|ocr|parse|"
     r"asr|tts|riva|whisper|canary|parakeet|audio|speech|detect|pii|deplot|kosmos|paligemma|"
-    r"fuyu|cosmos|sdxl|flux|diffusion|bge|translate|image", re.IGNORECASE)
+    r"fuyu|cosmos|sdxl|flux|diffusion|bge|translate|image|veo|aqa|moderation", re.IGNORECASE)
 # Name hints for small, fast models, best first; these answer quickest.
-_FAST_HINTS = ["nano", "mini", "flash", "1b", "3b", "4b", "8b", "7b", "9b", "12b", "small",
+_FAST_HINTS = ["nano", "mini", "flash", "instant", "1b", "3b", "4b", "8b", "7b", "9b", "12b", "small",
                "20b", "instruct"]
 # A model that was busy is skipped for a while; one missing from the account for longer.
 COOLDOWN_BUSY, COOLDOWN_MISSING = 120.0, 3600.0
@@ -119,8 +119,11 @@ class Compat:
         if resp.status_code != 200:
             return []
         try:
-            ids = [m["id"] for m in resp.json().get("data", []) if m.get("id")]
-        except (ValueError, AttributeError, TypeError):
+            body = resp.json()
+            entries = body if isinstance(body, list) else body.get("data", [])
+            ids = [m["id"].removeprefix("models/") for m in entries
+                   if m.get("id") and m.get("type") in (None, "chat", "language")]
+        except (ValueError, AttributeError, TypeError, KeyError):
             return []
         self.models[:] = ids
         return ids
@@ -307,31 +310,72 @@ class Compat:
         return f"{head}\n" + "\n".join(lines) + f"\n\n{tail}"
 
 
-class Ollama(Compat):
-    """Local models: no key, never busy, but a cold model can take a while to load."""
+class Local(Compat):
+    """A model server on this Mac (or a lab machine on the network): no key needed and
+    never "busy", but a cold model can take a while to load into memory."""
+
+    def __init__(self, *args, start_hint: str, models_hint: str, **kw):
+        super().__init__(*args, **kw)
+        self.start_hint, self.models_hint = start_hint, models_hint
 
     def unreachable(self, e: Exception) -> LLMError:
-        return LLMError("Ollama isn't running. Open the Ollama app (or run `ollama serve`), "
-                        "then try again.")
+        return LLMError(f"{self.label} isn't running. {self.start_hint}")
 
     def no_models_message(self) -> str:
-        return "No Ollama models installed yet. Run: ollama pull llama3.2:3b"
+        return f"{self.label} has no model to use yet. {self.models_hint}"
 
     def all_busy_message(self, tried: int) -> str:
-        return (f"No Ollama model answered in time (tried {tried}). The first request loads the "
-                "model into memory, so try again in a moment, or pick a smaller one: "
-                "ollama pull llama3.2:3b")
+        return (f"No {self.label} model answered in time (tried {tried}). The first request loads "
+                f"the model into memory, so try again in a moment, or use a smaller model.")
 
     def running(self) -> bool:
         url = urlparse(self.base_url)
         try:
-            with socket.create_connection((url.hostname or "localhost", url.port or 11434), timeout=0.3):
+            with socket.create_connection((url.hostname or "localhost", url.port or 80), timeout=0.3):
                 return True
         except OSError:
             return False
 
 
+def _cloud(name: str, label: str, url: str, default: str | None, fallbacks: list[str],
+           signup: str, **kw) -> Compat:
+    up = name.upper()
+    return Compat(name, label, os.environ.get(f"AIT_{up}_BASE_URL", url),
+                  f"AIT_{up}_MODEL", f"AIT_{up}_SUGGEST_MODEL", default, fallbacks,
+                  float(os.environ.get(f"AIT_{up}_TIMEOUT", "20")), 50.0,
+                  f"Create one at {signup}, then run `ait key`.", **kw)
+
+
+def _local(name: str, label: str, port: int, start_hint: str, models_hint: str,
+           fallbacks: list[str] | None = None) -> Local:
+    up = name.upper()
+    url = os.environ.get(f"AIT_{up}_URL", f"http://localhost:{port}").rstrip("/") + "/v1"
+    return Local(name, label, url, f"AIT_{up}_MODEL", f"AIT_{up}_SUGGEST_MODEL", None,
+                 fallbacks or [], float(os.environ.get(f"AIT_{up}_TIMEOUT", "50")), 55.0, "",
+                 start_hint=start_hint, models_hint=models_hint)
+
+
 PROVIDERS: dict[str, Compat] = {
+    # --- cloud APIs (your key) ---
+    "openrouter": _cloud(
+        "openrouter", "OpenRouter", "https://openrouter.ai/api/v1", None, [], "openrouter.ai/keys",
+        # OpenRouter's optional app attribution headers.
+        headers={"HTTP-Referer": "https://github.com/thejunghare/shelldon", "X-Title": "Shelldon"},
+        free_suffix=":free"),
+    # Groq and Cerebras run models on their own chips: the fastest answers available.
+    "groq": _cloud("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant",
+                   ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"], "console.groq.com/keys"),
+    "cerebras": _cloud("cerebras", "Cerebras", "https://api.cerebras.ai/v1", "llama3.1-8b",
+                       ["llama3.1-8b", "llama-3.3-70b"], "cloud.cerebras.ai"),
+    "gemini": _cloud("gemini", "Gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
+                     "gemini-2.5-flash", ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+                     "aistudio.google.com/apikey"),
+    "together": _cloud("together", "Together", "https://api.together.xyz/v1",
+                       "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                       ["meta-llama/Llama-3.3-70B-Instruct-Turbo"], "api.together.ai/settings/api-keys"),
+    "fireworks": _cloud("fireworks", "Fireworks", "https://api.fireworks.ai/inference/v1",
+                        "accounts/fireworks/models/llama-v3p1-8b-instruct",
+                        ["accounts/fireworks/models/llama-v3p1-8b-instruct"], "fireworks.ai/account/api-keys"),
     "nvidia": Compat(
         "nvidia", "NVIDIA", os.environ.get("AIT_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         "AIT_NVIDIA_EXPLAIN_MODEL", "AIT_NVIDIA_SUGGEST_MODEL", "openai/gpt-oss-20b",
@@ -340,43 +384,73 @@ PROVIDERS: dict[str, Compat] = {
         # Free-tier models can queue; give up before the shell's 60s wait runs out.
         float(os.environ.get("AIT_NVIDIA_TIMEOUT", "20")), 50.0,
         "Create a new one at build.nvidia.com, then run `ait key`."),
-    "openrouter": Compat(
-        "openrouter", "OpenRouter", os.environ.get("AIT_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-        "AIT_OPENROUTER_MODEL", "AIT_OPENROUTER_SUGGEST_MODEL", None, [],
-        20.0, 50.0, "Create one at openrouter.ai/keys, then run `ait key`.",
-        # OpenRouter's optional app attribution headers.
-        headers={"HTTP-Referer": "https://github.com/thejunghare/shelldon", "X-Title": "Shelldon"},
-        free_suffix=":free"),
-    "ollama": Ollama(
-        "ollama", "Ollama", os.environ.get("AIT_OLLAMA_URL", "http://localhost:11434").rstrip("/") + "/v1",
-        "AIT_OLLAMA_MODEL", "AIT_OLLAMA_SUGGEST_MODEL", None, [],
-        # Loading a model into memory the first time can take tens of seconds.
-        float(os.environ.get("AIT_OLLAMA_TIMEOUT", "50")), 55.0, ""),
+    # --- local model servers (no key, nothing leaves your Mac) ---
+    "ollama": _local("ollama", "Ollama", 11434,
+                     "Open the Ollama app (or run `ollama serve`), or install it: brew install ollama",
+                     "Run: ollama pull llama3.2:3b"),
+    "lmstudio": _local("lmstudio", "LM Studio", 1234,
+                       "Open LM Studio > Developer > Start server (or run `lms server start`).",
+                       "Download a model in LM Studio (MLX models are fastest on Apple Silicon)."),
+    # These four serve one model on port 8080, and accept any model name for it.
+    "mlx": _local("mlx", "mlx-lm", 8080,
+                  "Start it: mlx_lm.server --model mlx-community/Llama-3.2-3B-Instruct-4bit "
+                  "(install: pip install mlx-lm)",
+                  "Start mlx_lm.server with --model <a model from huggingface.co/mlx-community>.",
+                  ["default_model"]),
+    "llamacpp": _local("llamacpp", "llama.cpp", 8080,
+                       "Start it: llama-server -m <model.gguf> --port 8080 (install: brew install llama.cpp)",
+                       "Start llama-server with -m <model.gguf>.", ["default"]),
+    "llamafile": _local("llamafile", "llamafile", 8080,
+                        "Run your .llamafile; it serves on port 8080.",
+                        "Run a .llamafile from github.com/Mozilla-Ocho/llamafile.", ["default"]),
+    "localai": _local("localai", "LocalAI", 8080,
+                      "Start LocalAI on port 8080 (see localai.io).",
+                      "Install a model in LocalAI's gallery."),
+    "jan": _local("jan", "Jan", 1337,
+                  "Open Jan > Settings > Local API Server > Start server.",
+                  "Download and start a model in Jan."),
+    "gpt4all": _local("gpt4all", "GPT4All", 4891,
+                      "Open GPT4All > Settings > Enable Local API Server.",
+                      "Download a model in GPT4All."),
+    # exo joins several Macs into one cluster, so models too big for one Mac can run.
+    "exo": _local("exo", "exo", 52415,
+                  "Start exo on each Mac in the cluster: exo (see github.com/exo-explore/exo).",
+                  "Pick a model in exo's web UI at localhost:52415."),
 }
+LOCAL = tuple(n for n, p in PROVIDERS.items() if isinstance(p, Local))
 
 # --- which provider ----------------------------------------------------------------
 
-ALL = ("anthropic", "openrouter", "nvidia", "ollama")
-_KEY_SOURCES = {
-    "anthropic": ("ANTHROPIC_API_KEY", "ai-terminal"),
-    "nvidia": ("NVIDIA_API_KEY", "ai-terminal-nvidia"),
-    "openrouter": ("OPENROUTER_API_KEY", "ai-terminal-openrouter"),
+ALL = ("anthropic", *PROVIDERS)
+# Tried in this order by `ait use auto`: keys first, then local servers. Only one of the
+# port-8080 servers (llama.cpp, mlx-lm, llamafile, LocalAI) is probed; they're alike.
+AUTO = ("anthropic", "openrouter", "groq", "cerebras", "gemini", "together", "fireworks",
+        "nvidia", "ollama", "lmstudio", "jan", "gpt4all", "exo", "llamacpp")
+# provider -> (environment variable, Keychain service, key prefix or None)
+KEYS = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ai-terminal", "sk-ant-"),
+    "openrouter": ("OPENROUTER_API_KEY", "ai-terminal-openrouter", "sk-or-"),
+    "groq": ("GROQ_API_KEY", "ai-terminal-groq", "gsk_"),
+    "cerebras": ("CEREBRAS_API_KEY", "ai-terminal-cerebras", "csk-"),
+    "gemini": ("GEMINI_API_KEY", "ai-terminal-gemini", "AIza"),
+    "together": ("TOGETHER_API_KEY", "ai-terminal-together", None),
+    "fireworks": ("FIREWORKS_API_KEY", "ai-terminal-fireworks", "fw_"),
+    "nvidia": ("NVIDIA_API_KEY", "ai-terminal-nvidia", "nvapi-"),
 }
+KEY_CACHE_SECONDS = 60.0     # reading the Keychain costs a process per provider
+_key_cache: tuple[float, dict[str, str]] = (0.0, {})
 
 
 def _owner(key: str, slot: str) -> str:
     """The provider a key belongs to; its prefix wins over the slot it was saved in."""
-    if key.startswith("nvapi-"):
-        return "nvidia"
-    if key.startswith("sk-or-"):
-        return "openrouter"
-    if key.startswith("sk-ant-"):
-        return "anthropic"
+    for provider, (_, _, prefix) in KEYS.items():
+        if prefix and key.startswith(prefix):
+            return provider
     return slot
 
 
 def _api_key(provider: str) -> str | None:
-    env_var, service = _KEY_SOURCES[provider]
+    env_var, service, _ = KEYS[provider]
     if key := os.environ.get(env_var):
         return key
     try:
@@ -390,39 +464,47 @@ def _api_key(provider: str) -> str | None:
 
 
 def _available_keys() -> dict[str, str]:
+    global _key_cache
+    if time.monotonic() - _key_cache[0] < KEY_CACHE_SECONDS:
+        return _key_cache[1]
     found: dict[str, str] = {}
-    for slot in _KEY_SOURCES:
+    for slot in KEYS:
         if key := _api_key(slot):
             found.setdefault(_owner(key, slot), key)
+    _key_cache = (time.monotonic(), found)
     return found
 
 
 def _usable(provider: str, keys: dict[str, str]) -> bool:
-    return provider in keys or (provider == "ollama" and PROVIDERS["ollama"].running())
+    return provider in keys or (provider in LOCAL and PROVIDERS[provider].running())
+
+
+def _key_for(provider: str, keys: dict[str, str]) -> str:
+    """The API key; local servers need none, but some (Jan, LocalAI) can be given one."""
+    return keys.get(provider) or os.environ.get(f"AIT_{provider.upper()}_API_KEY", "")
 
 
 def _missing(provider: str) -> MissingKey:
-    if provider == "ollama":
-        return MissingKey("Ollama isn't running. Open the Ollama app (or `ollama serve`), "
-                          "or install it: brew install ollama")
+    if provider in LOCAL:
+        return MissingKey(PROVIDERS[provider].unreachable(OSError()).args[0])
     return MissingKey(f"No {provider} API key. Run `ait key`.")
 
 
 def _provider() -> tuple[str, str]:
-    """Returns (provider, api_key); the key is "" for Ollama."""
+    """Returns (provider, api_key); the key is "" for a local server."""
     keys = _available_keys()
     chosen = (os.environ.get("AIT_PROVIDER") or _settings.get("provider") or "").lower()
     if chosen and chosen != "auto":
         if chosen not in ALL:
             raise LLMError(f"Unknown provider '{chosen}'. Use one of: {', '.join(ALL)}")
         if _usable(chosen, keys):
-            return chosen, keys.get(chosen, "")
+            return chosen, _key_for(chosen, keys)
         raise _missing(chosen)
-    for provider in ALL:
+    for provider in AUTO:
         if _usable(provider, keys):
-            return provider, keys.get(provider, "")
-    raise MissingKey("No AI provider set up. Run `ait key` (Anthropic, OpenRouter or NVIDIA), "
-                     "or install Ollama for local models: brew install ollama")
+            return provider, _key_for(provider, keys)
+    raise MissingKey("No AI provider set up. Run `ait key` to save a cloud key, or start a "
+                     "local model server such as Ollama (brew install ollama).")
 
 
 def use(provider: str) -> str:
@@ -435,7 +517,7 @@ def use(provider: str) -> str:
     if os.environ.get("AIT_PROVIDER"):
         note = f"\nNote: AIT_PROVIDER={os.environ['AIT_PROVIDER']} is set and takes priority."
     if provider == "auto":
-        return "Using the first available provider: " + ", ".join(ALL) + note
+        return "Using the first available provider: cloud keys first, then local servers." + note
     if not _usable(provider, _available_keys()):
         return f"Switched to {provider}, but it isn't ready yet: {_missing(provider)}{note}"
     return f"Switched to {provider}. Run `ait models` to pick its fastest model.{note}"

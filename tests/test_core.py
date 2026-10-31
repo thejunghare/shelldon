@@ -222,6 +222,7 @@ class ProviderTestBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         store.CACHE_DIR = self.tmp.name
         llm._settings = store.DiskCache("settings")
+        llm._key_cache = (0.0, {})                    # keys change between tests
         self.p = llm.PROVIDERS[self.NAME]
         self.p.saved = store.DiskCache(self.NAME)
         self.p.models.clear()
@@ -406,9 +407,101 @@ class OllamaTest(ProviderTestBase):
         self.assertIn("Switched to ollama", llm.use("ollama"))
         self.assertTrue(llm.use("bogus").startswith("ERR:"))
         os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-x"
+        llm._key_cache = (0.0, {})
         llm.use("auto")
         self.assertEqual(llm._provider()[0], "openrouter")         # auto: keys before Ollama
         os.environ.pop("OPENROUTER_API_KEY")
+
+
+class EveryProviderTest(unittest.TestCase):
+    """Each provider, one by one, against a fake server shaped like its real API."""
+
+    # provider: (key or "" for local, /models reply (None = endpoint missing), model expected)
+    CASES = {
+        "openrouter": ("sk-or-v1-x", {"data": [{"id": "meta-llama/llama-3.3-70b-instruct:free"}]},
+                       "meta-llama/llama-3.3-70b-instruct:free"),
+        "groq": ("gsk_" + "a" * 30, {"data": [{"id": "whisper-large-v3"}, {"id": "llama-3.1-8b-instant"}]},
+                 "llama-3.1-8b-instant"),
+        "cerebras": ("csk-" + "a" * 30, {"data": [{"id": "llama3.1-8b"}]}, "llama3.1-8b"),
+        "gemini": ("AIza" + "a" * 35, {"data": [{"id": "models/text-embedding-004"},
+                                                {"id": "models/gemini-2.5-flash"}]}, "gemini-2.5-flash"),
+        "together": ("tok", [{"id": "black-forest-labs/FLUX.1-schnell", "type": "image"},
+                             {"id": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "type": "chat"}],
+                     "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+        "fireworks": ("fw_" + "a" * 30, {"data": [{"id": "accounts/fireworks/models/llama-v3p1-8b-instruct"}]},
+                      "accounts/fireworks/models/llama-v3p1-8b-instruct"),
+        "nvidia": ("nvapi-x", {"data": [{"id": "openai/gpt-oss-20b"}]}, "openai/gpt-oss-20b"),
+        "ollama": ("", {"data": [{"id": "nomic-embed-text"}, {"id": "llama3.2:3b"}]}, "llama3.2:3b"),
+        "lmstudio": ("", {"data": [{"id": "mlx-community/qwen2.5-coder-7b-instruct-4bit"}]},
+                     "mlx-community/qwen2.5-coder-7b-instruct-4bit"),
+        "mlx": ("", None, "default_model"),           # mlx_lm.server may not list models
+        "llamacpp": ("", None, "default"),             # llama-server serves its one model
+        "llamafile": ("", {"data": [{"id": "Llama-3.2-3B-Instruct.Q6_K.llamafile"}]},
+                      "Llama-3.2-3B-Instruct.Q6_K.llamafile"),
+        "localai": ("", {"data": [{"id": "phi-3-mini"}]}, "phi-3-mini"),
+        "jan": ("", {"data": [{"id": "llama3.2-3b-instruct"}]}, "llama3.2-3b-instruct"),
+        "gpt4all": ("", {"data": [{"id": "Llama 3.2 3B Instruct"}]}, "Llama 3.2 3B Instruct"),
+        "exo": ("", {"data": [{"id": "llama-3.2-3b"}]}, "llama-3.2-3b"),
+    }
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        store.CACHE_DIR = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_covers_every_provider(self):
+        self.assertEqual(set(self.CASES), set(llm.PROVIDERS))
+
+    def test_each_provider_answers(self):
+        import httpx, json
+        for name, (key, catalog, expected) in self.CASES.items():
+            with self.subTest(provider=name):
+                p = llm.PROVIDERS[name]
+                p.saved, p.models, p.resolved, p.cooldown = store.DiskCache(name), [], {}, {}
+                for env in (p.model_env, p.suggest_env):
+                    os.environ.pop(env, None)
+                seen = []
+
+                def handler(request, catalog=catalog, seen=seen):
+                    if request.url.path.endswith("/models"):
+                        return httpx.Response(404) if catalog is None else httpx.Response(200, json=catalog)
+                    seen.append((request.url.path, json.loads(request.content)["model"],
+                                 request.headers.get("authorization")))
+                    return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
+                llm._clients[name] = httpx.AsyncClient(base_url=p.base_url,
+                                                       transport=httpx.MockTransport(handler))
+                try:
+                    text, model = asyncio.run(p.complete(key, "explain", "sys", "user"))
+                finally:
+                    llm._clients.pop(name, None)
+                self.assertEqual((text, model), ("hi", expected))
+                path, sent_model, auth = seen[-1]
+                self.assertTrue(path.endswith("/chat/completions"), path)
+                self.assertEqual(auth, f"Bearer {key}" if key else None)   # local: no key sent
+
+    def test_key_prefixes(self):
+        for key, owner in [("sk-ant-x", "anthropic"), ("sk-or-v1-x", "openrouter"), ("gsk_x", "groq"),
+                           ("csk-x", "cerebras"), ("AIzaX", "gemini"), ("fw_x", "fireworks"),
+                           ("nvapi-x", "nvidia"), ("0123abcd", "together")]:
+            self.assertEqual(llm._owner(key, "together"), owner, key)
+
+    def test_new_keys_are_redacted(self):
+        for key in ("gsk_" + "A1b2" * 8, "csk-" + "A1b2" * 8, "fw_" + "A1b2" * 8):
+            self.assertNotIn(key, context.redact(f"export KEY={key}"))
+            self.assertNotIn(key, context.redact(f"curl -H {key}"))
+
+    def test_local_servers_say_how_to_start(self):
+        for name in llm.LOCAL:
+            p = llm.PROVIDERS[name]
+            self.assertTrue(p.base_url.startswith("http://localhost:"), name)
+            self.assertIn(p.label, str(p.unreachable(OSError())))
+
+    def test_auto_order_tries_keys_before_local_servers(self):
+        first_local = min(llm.AUTO.index(n) for n in llm.LOCAL if n in llm.AUTO)
+        self.assertTrue(all(llm.AUTO.index(n) < first_local for n in llm.KEYS))
 
 
 class DiskCacheTest(unittest.TestCase):

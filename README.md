@@ -59,7 +59,7 @@ So Shelldon is a small, free, open-source plugin for zsh and bash. Bring your ow
 | **Safety first** | A local risk check flags deletes, overwrites, `sudo`, `git reset --hard`, recursive permission changes, stopping processes and `curl \| sh`, whatever the SI says. |
 | **Private by design** | API key in the macOS Keychain, secrets redacted before anything leaves your Mac, shell history never sent. |
 | **Fast** | A small background daemon keeps connections warm, answers are cached on disk, and stale requests are cancelled as you type. |
-| **Your choice of AI** | Local models with [Ollama](https://ollama.com) (free, offline, nothing leaves your Mac), hundreds of models through one [OpenRouter](https://openrouter.ai) key (many free), a free [NVIDIA](https://build.nvidia.com) key, or [Anthropic](https://console.anthropic.com) (Claude) for the best answers. Switch any time with `ait use`. |
+| **17 AI providers** | Local models (Ollama, LM Studio/MLX, llama.cpp, Jan, exo and more: free, offline, nothing leaves your Mac) or cloud APIs (Anthropic, OpenRouter, Groq, Cerebras, Gemini, Together, Fireworks, NVIDIA). Switch any time with `ait use`. |
 
 ## Quick start
 
@@ -157,8 +157,8 @@ Type a command, **don't press Enter**, press `Ctrl+E`. If the cursor is mid-line
 
 | Command | What it does |
 |---|---|
-| `ait key` | Save an API key to the Keychain (Anthropic, OpenRouter or NVIDIA) |
-| `ait use <provider>` | Switch between `anthropic`, `openrouter`, `nvidia`, `ollama`, or `auto` |
+| `ait key [provider]` | Save an API key to the Keychain (provider detected from the key) |
+| `ait use <provider>` | Switch provider (see [the list](#ai-providers-and-models)), or `auto`; `ait use` alone lists them |
 | `ait status` | Show the daemon, provider and model |
 | `ait models` | Find the fastest model that answers on the current provider, and use it from now on |
 | `ait suggest on` / `history` / `off` | SI + history suggestions, history only, or none (zsh) |
@@ -171,31 +171,62 @@ Type a command, **don't press Enter**, press `Ctrl+E`. If the cursor is mid-line
 
 ## AI providers and models
 
-Shelldon works with four providers. Pick one, or set up several and switch with `ait use`.
+Shelldon works with **17 providers**: cloud APIs with your own key, and model servers running on your own Mac. Set up as many as you like and switch with `ait use <name>`.
 
-| Provider | What you need | Cost | Good for |
-|---|---|---|---|
-| **Ollama** (local) | [Ollama](https://ollama.com) installed and one model pulled | Free | Privacy, offline use, classrooms: nothing leaves your Mac, never "busy" |
-| **OpenRouter** | A key from [openrouter.ai/keys](https://openrouter.ai/keys) (`sk-or-…`) | Many free models; others pay per use | One key for hundreds of models |
-| **NVIDIA** | A key from [build.nvidia.com](https://build.nvidia.com) → any model → *Get API Key* (`nvapi-…`) | Free tier | Free cloud models (busy at peak times) |
-| **Anthropic** | A key from [console.anthropic.com](https://console.anthropic.com) → *API Keys* (`sk-ant-…`) | Pay per use | The most reliable, highest-quality answers |
+### Cloud (your key)
 
-**Saving a key.** Run `ait key` and paste it. The provider is detected from the prefix, and the key is stored in the macOS Keychain (services `ai-terminal`, `ai-terminal-openrouter`, `ai-terminal-nvidia`), never in a file. You can also set `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` or `NVIDIA_API_KEY` in your environment; those take priority over the Keychain. Ollama needs no key.
-
-**Which provider is used.** `ait use <provider>` remembers your choice (`AIT_PROVIDER` overrides it). With `ait use auto` (the default), it's the first available of: Anthropic key, OpenRouter key, NVIDIA key, a running Ollama.
-
-**Picking a model.** Run `ait models` on any provider. Shelldon asks the provider which models you can use, tries the likeliest (small, fast and, on OpenRouter, free ones first), keeps the fastest that answers and remembers the others as backups. If a model is busy, rate limited or missing, the next one takes over automatically.
-
-| | Anthropic | OpenRouter | NVIDIA | Ollama |
+| `ait use` | Provider | Get a key | Cost | Good for |
 |---|---|---|---|---|
-| Default model | `claude-sonnet-5-5` (explain, `why`, `#`), `claude-haiku-5-5` (suggestions) | Fastest free model from `ait models` | `openai/gpt-oss-20b`, else fastest from `ait models` | Smallest installed model, or fastest from `ait models` |
-| Choose your own | `AIT_EXPLAIN_MODEL`, `AIT_SUGGEST_MODEL` | `AIT_OPENROUTER_MODEL`, `AIT_OPENROUTER_SUGGEST_MODEL` | `AIT_NVIDIA_EXPLAIN_MODEL`, `AIT_NVIDIA_SUGGEST_MODEL` | `AIT_OLLAMA_MODEL`, `AIT_OLLAMA_SUGGEST_MODEL` |
+| `anthropic` | Anthropic (Claude) | [console.anthropic.com](https://console.anthropic.com) (`sk-ant-…`) | Pay per use | The most reliable, highest-quality answers |
+| `openrouter` | OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) (`sk-or-…`) | Many free models | One key for hundreds of models |
+| `groq` | Groq | [console.groq.com/keys](https://console.groq.com/keys) (`gsk_…`) | Free tier | **Extremely fast** answers |
+| `cerebras` | Cerebras | [cloud.cerebras.ai](https://cloud.cerebras.ai) (`csk-…`) | Free tier | **Extremely fast** answers |
+| `gemini` | Google Gemini | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (`AIza…`) | Free tier | Strong free models |
+| `together` | Together AI | [api.together.ai](https://api.together.ai/settings/api-keys) | Pay per use | Big open models (70B+) |
+| `fireworks` | Fireworks AI | [fireworks.ai](https://fireworks.ai/account/api-keys) (`fw_…`) | Pay per use | Fast open models |
+| `nvidia` | NVIDIA | [build.nvidia.com](https://build.nvidia.com) (`nvapi-…`) | Free tier | Free models (busy at peak times) |
 
-**Ollama tips.** Good starting models: `llama3.2:3b` (fast, runs on any Apple Silicon Mac) and `qwen2.5-coder:7b` (better with commands, needs about 8 GB of RAM). The first request after Ollama starts loads the model into memory and can take a few seconds. Running Ollama on another machine? Set `AIT_OLLAMA_URL=http://that-machine:11434`.
+Save a key with `ait key` and paste it: the provider is detected from the key's prefix. Together keys have no prefix, so use `ait key together`. Keys go into the macOS Keychain (services `ai-terminal-<provider>`, `ai-terminal` for Anthropic), never into a file. Environment variables work too and take priority: `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `GEMINI_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, `NVIDIA_API_KEY`.
 
-**OpenRouter tips.** Free models (ids ending in `:free`) have daily limits; Shelldon moves to another free model when one is used up. To use a paid model, add credits on OpenRouter and set `AIT_OPENROUTER_MODEL`.
+### Local (no key, nothing leaves your Mac)
 
-After changing a key or model variable, run `ait restart`.
+| `ait use` | Runtime | Start it | Port |
+|---|---|---|---|
+| `ollama` | [Ollama](https://ollama.com) | `brew install ollama && brew services start ollama`, then `ollama pull llama3.2:3b` | 11434 |
+| `lmstudio` | [LM Studio](https://lmstudio.ai) | Download a model (MLX ones are fastest on Apple Silicon), then *Developer → Start server* | 1234 |
+| `mlx` | [mlx-lm](https://github.com/ml-explore/mlx-lm) | `pip install mlx-lm`, then `mlx_lm.server --model mlx-community/Llama-3.2-3B-Instruct-4bit` | 8080 |
+| `llamacpp` | [llama.cpp](https://github.com/ggml-org/llama.cpp) | `brew install llama.cpp`, then `llama-server -m model.gguf --port 8080` | 8080 |
+| `llamafile` | [llamafile](https://github.com/Mozilla-Ocho/llamafile) | Download a `.llamafile`, `chmod +x` it and run it | 8080 |
+| `localai` | [LocalAI](https://localai.io) | Run LocalAI and install a model from its gallery | 8080 |
+| `jan` | [Jan](https://jan.ai) | *Settings → Local API Server → Start server* | 1337 |
+| `gpt4all` | [GPT4All](https://gpt4all.io) | *Settings → Enable Local API Server* | 4891 |
+| `exo` | [exo](https://github.com/exo-explore/exo) | Run `exo` on two or more Macs: they pool memory to run models too big for one | 52415 |
+
+Each server can live elsewhere, e.g. one strong machine serving a whole classroom: set `AIT_<NAME>_URL`, such as `AIT_OLLAMA_URL=http://lab-pc:11434`. If a server needs a key, set `AIT_<NAME>_API_KEY` (e.g. `AIT_JAN_API_KEY`).
+
+**Not supported: AirLLM.** It runs huge models on little memory by loading them from disk one layer at a time, so an answer takes minutes. That suits overnight batch jobs, not a terminal; it also has no server API to connect to. For bigger models than your Mac holds, use exo across several Macs, or a cloud provider.
+
+### Which provider is used
+
+`ait use <name>` remembers your choice (`AIT_PROVIDER` overrides it). With `ait use auto` (the default), it's the first available of: an Anthropic, OpenRouter, Groq, Cerebras, Gemini, Together, Fireworks or NVIDIA key, then a running Ollama, LM Studio, Jan, GPT4All, exo or port-8080 server.
+
+### Picking a model
+
+Run `ait models` with any provider. Shelldon asks it which models you can use, tries the likeliest (small and fast first; on OpenRouter, free ones first), keeps the fastest that answers and remembers the others as backups. If a model is busy, rate limited or missing, the next one takes over automatically.
+
+To choose a model yourself, set `AIT_<NAME>_MODEL` (and optionally `AIT_<NAME>_SUGGEST_MODEL` for suggestions), e.g. `AIT_GROQ_MODEL=llama-3.3-70b-versatile`. Anthropic uses `AIT_EXPLAIN_MODEL` / `AIT_SUGGEST_MODEL` (defaults `claude-sonnet-5-5` / `claude-haiku-5-5`), and NVIDIA `AIT_NVIDIA_EXPLAIN_MODEL`. After changing a variable, run `ait restart`.
+
+### Which should I use?
+
+| You want | Use |
+|---|---|
+| Free, private, offline (classrooms, travel) | `ollama`, or `lmstudio` with an MLX model for extra speed |
+| The fastest answers | `groq` or `cerebras` |
+| The best answers | `anthropic` |
+| Many models, one key | `openrouter` |
+| A model too big for your Mac | `exo` across several Macs, or `together` / `openrouter` |
+
+**Speeding up Ollama:** pick a model that fits your RAM (8 GB: `llama3.2:3b`; 16 GB: `qwen2.5-coder:7b`), and keep it loaded with `launchctl setenv OLLAMA_KEEP_ALIVE 24h` and `launchctl setenv OLLAMA_FLASH_ATTENTION 1`, then restart Ollama.
 
 ## Configuration
 
@@ -210,7 +241,7 @@ Add any of these above the `source` line in `~/.zshrc` or `~/.bashrc`:
 | `AIT_SUGGEST_DELAY` | `0.8` | Seconds of pause before asking the SI (zsh) |
 | `AIT_SUGGEST_STYLE` | `fg=8` | How ghost text is drawn, e.g. `fg=240` for fainter (zsh) |
 | `AIT_EXPLAIN_KEY` | `^E` (zsh), `\C-e` (bash) | Key binding for explain |
-| `AIT_PROVIDER` | unset | Force `anthropic`, `openrouter`, `nvidia` or `ollama` (overrides `ait use`) |
+| `AIT_PROVIDER` | unset | Force a provider by name, e.g. `groq` or `ollama` (overrides `ait use`) |
 | `AIT_TIMEOUT` | `60` | Seconds to wait for an answer |
 | `NO_COLOR` | unset | `1` for output without colour |
 
@@ -256,11 +287,9 @@ flowchart LR
     keychain[("macOS Keychain<br/>API keys")]
     subgraph cloud["Cloud APIs (your key)"]
         direction TB
-        anthropic["Anthropic<br/>Claude"]
-        openrouter["OpenRouter<br/>hundreds of models"]
-        nvidia["NVIDIA<br/>build.nvidia.com"]
+        anthropic["Anthropic · OpenRouter<br/>Groq · Cerebras · Gemini<br/>Together · Fireworks · NVIDIA"]
     end
-    ollama["Ollama<br/>local models on your Mac"]
+    ollama["Local servers on your Mac<br/>Ollama · LM Studio · mlx-lm<br/>llama.cpp · llamafile · LocalAI<br/>Jan · GPT4All · exo"]
 
     zsh -- "Unix socket<br/>~/.ai-terminal.sock (600)" --> server
     client -- "Unix socket" --> server
@@ -303,6 +332,7 @@ The plugin never blocks your typing: requests go to a small local daemon over a 
 - [ ] Homebrew install (`brew install shelldon`)
 - [x] Local models via Ollama, fully offline
 - [x] OpenRouter: hundreds of models with one key
+- [x] 17 providers: Groq, Cerebras, Gemini, Together, Fireworks, LM Studio, mlx-lm, llama.cpp, llamafile, LocalAI, Jan, GPT4All, exo
 
 Ideas and votes welcome in [Issues](https://github.com/thejunghare/shelldon/issues).
 
